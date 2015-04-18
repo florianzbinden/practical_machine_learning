@@ -1,0 +1,277 @@
+---
+title: "Human Activity Recognition"
+subtitle: "Building a prediction model"
+output: html_document
+---
+
+# Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+# Summary of the analysis
+
+The main steps of the analysis are described.
+After loading the data, the predictors with a small variance are removed. This is common practice although in some cases it can be a mistake.
+The first columns containg irrelevant information to the statistical learning are removed. Columns containing only NA are removed as well.
+Correlated columns are removed, based on an arbitrary threshold of 80%. No sensitivity analysis was carried out in order to define this value precisely.
+The training dataset is ready for fitting, but it is first split into 2 parts (because the testing dataset contains no information about the classe, it is a blind test.)
+This CV (cross-validation hereafter) dataset will be used to assess the test error.
+The selected method for fitting is Random Forest. A comparison wit another method is made even though it is known that the Random Forest is one of the best, if not the best, method for fitting;
+the drawbacks are its interpretability and its computer intensive use. But for this project it is not that relevant.
+Within the train function of the caret package is a method included for CV and it was used.
+Given the accuracy of the method, CV dataset was used to assess test error.
+
+# Data
+
+## working directory
+
+```{r}
+setwd("/Users/fisoflo/Documents/courses/stat/R_Hopkins/pract machine learning")  # Mac
+```
+
+## packages
+
+```{r}
+library(caret)
+library(randomForest)
+set.seed(12345)
+```
+
+## data loading
+
+```{r}
+URL1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+URL2 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+filename1 <- "pml-training.csv"
+filename2 <- "pml-testing.csv"
+download.file(url=URL1, destfile=filename1, method="curl")
+download.file(url=URL2, destfile=filename2, method="curl")
+```
+
+## reading the data
+
+```{r}
+training <- read.csv("pml-training.csv", row.names=1, header = T , na.strings=c("NA","NaN", "", "NULL", "#DIV/0!"))
+testing <- read.csv("pml-testing.csv", row.names=1, header = T, na.strings=c("NA","NaN", "", "NULL", "#DIV/0!") )
+```
+
+The prediction is done on the "classe" variable.
+
+```{r}
+table(training$classe)
+```
+
+# data preparation
+
+## Remove near zero variables
+
+```{r}
+nsv <- nearZeroVar(training, saveMetrics=TRUE)
+training_nzv <- training[ ,!nsv$nzv]
+testing_nzv <- testing[ ,!nsv$nzv]
+```
+
+Many columns contain NA ; this code removes the variables with NA ; complete.cases does not work
+
+```{r}
+training_filter_no_na <- training_nzv[ ,(colSums(is.na(training_nzv)) == 0)] # subset only the columns where there is no NA at all
+testing_filter_no_na <- testing_nzv[ ,(colSums(is.na(testing_nzv)) == 0)]
+```
+
+Remove unnecessary columns
+
+```{r}
+col_remove_train <- c("user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","num_window")
+col_remove_test <- c("user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","num_window","problem_id")
+training_col_removed <- training_filter_no_na[ ,!(names(training_filter_no_na) %in% col_remove_train)]
+testing_col_removed <- testing_filter_no_na[ ,!(names(testing_filter_no_na) %in% col_remove_test)]
+```
+
+## identifying Correlated Predictors 
+(from http://topepo.github.io/caret/preprocess.html)
+
+```{r}
+training_col_removed_wo <- training_col_removed[ , -ncol(training_col_removed)]
+
+descrCor <-  cor(data.matrix(training_col_removed_wo)) # numeric values in a matrix are mandatory ; therefore I remove the "classe" and make a matrix
+highCorr <- sum(abs(descrCor[upper.tri(descrCor)]) > .98) # threshold set at 98% correlation
+highCorr
+```
+
+this value shows the number of correlated variables with a value above 98% (look at min and max (careful with abs below)).
+
+```{r}
+summary(descrCor[upper.tri(descrCor)]) 
+hist(descrCor[upper.tri(descrCor)])
+```
+
+I choose to remove the predictors showing a correlation above 80%.
+
+```{r}
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .8)
+filteredDescr <- training_col_removed_wo[,-highlyCorDescr] # this is my training dataset w/o correlated predictors
+descrCor2 <- cor(filteredDescr)
+summary(descrCor2[upper.tri(descrCor2)])
+```
+
+I am left with
+```{r}
+dim(filteredDescr)[2]
+```
+predictors.
+
+The same predictors must be removed in the testing due to correlation in the training dataset.
+
+```{r}
+filtered_testing <- testing_col_removed[,-highlyCorDescr]
+```
+
+I check if all of the column names are identical : 
+
+```{r}
+table(names(filtered_testing) == names(filteredDescr))
+```
+
+Because there are only TRUE, that means I have got a cleaned training and testing dataset that contain no correlated predictors.
+
+## Linear depencies
+(from http://topepo.github.io/caret/preprocess.html)
+For the sake of completeness, I check if there are linear dependencies between predictors that would be detected by another caret package function
+
+```{r}
+findLinearCombos(filteredDescr)
+```
+
+The list is empty, there is no linear dependencies.
+I just rebuild my training dataset with the "classe".
+
+```{r}
+training_ready <- cbind(training$classe, filteredDescr)
+colnames(training_ready)[1] <- "classe"
+```
+
+There is no classe column in the testing dataset, because it is what I am supposed to predict !
+
+# CV - data splitting
+
+A part of the training dataset will be used as a CV dataset, for assessing the test error. A 30% part is or CV.
+
+```{r}
+inTrain <- createDataPartition(y = training_ready$classe, p = 0.7, list = FALSE)
+training_ds <- training_ready[inTrain, ]
+valid_ds <- training_ready[-inTrain, ]
+```
+
+# Random Forest
+The Random Forest technique is often the most powerful of all. Therefore I go directly with this technique.
+
+```{r}
+rf_model <- randomForest(classe ~ ., data = training_ds )
+rf_model
+```
+
+The error rate, as well as the accuracy, is written in the output of the model.
+
+# CV
+
+```{r}
+valid_predict <- predict(rf_model, valid_ds)
+confusionMatrix(valid_predict, valid_ds$classe)
+```
+
+The accuracy is (in %)
+```{r}
+unname(100*(confusionMatrix(valid_predict, valid_ds$classe)$overall[1]))
+```
+
+and the estimtated error rate is (in %) about 
+```{r}
+unname(100*(1-confusionMatrix(valid_predict, valid_ds$classe)$overall[1]))
+```
+
+# Prediction
+On the testing dataset, the 20 predicted classes are :
+```{r}
+predict(rf_model, testing_col_removed)
+```
+
+This renders 100% correct answers when submitted in the course website.
+
+# Discussion
+
+## Integrated CV
+
+It is possible to integrate the CV inside the randomForeste function by using the xtest and ytest. I did it below but do not show the result ; the error rate and accuracy are identical to the ones calculated by hand.
+
+```{r}
+rf_model_cv <- randomForest(classe ~ ., data = training_ds , ytest = valid_ds$classe , xtest =valid_ds[, -1] )
+rf_model_cv
+```
+
+## Predictors
+It was a deliberate choice not to remove other predictors (except the one higher based on correlation).
+
+I am left with
+```{r}
+dim(filteredDescr)[2]
+```
+predictors. All of them are used in the prediction model.
+
+The importance of predictors on the prediction is shown in the graph below : 
+```{r}
+varImpPlot(rf_model,)
+```
+
+## Other prediction model
+Another model is tested and its accuracy compared to the one from Random Forest.
+```{r}
+rpart_model <- train(classe ~ ., method = "rpart", data = training_ds)
+rpart_model
+```
+
+```{r}
+valid_predict_rpart <- predict(rpart_model, valid_ds)
+confusionMatrix(valid_predict_rpart, valid_ds$classe)
+```
+
+The accuracy is (in %)
+```{r}
+unname(100*(confusionMatrix(valid_predict_rpart, valid_ds$classe)$overall[1]))
+```
+
+and the estimtated error rate is (in %) about 
+```{r}
+unname(100*(1-confusionMatrix(valid_predict_rpart, valid_ds$classe)$overall[1]))
+```
+
+Based on these indicators, one can conclude that this model is much less accurate that the model based on Random Forest.
+
+# Conclusion
+
+The accuracy of the model is excellent, one can even think of overfitting, although the test error seems low when using a validation set.
+
+The accuracy is (in %)
+```{r}
+unname(100*(confusionMatrix(valid_predict, valid_ds$classe)$overall[1]))
+```
+
+and the estimtated error rate is (in %) about 
+```{r}
+unname(100*(1-confusionMatrix(valid_predict, valid_ds$classe)$overall[1]))
+```
+
+Removing some predictors does not seem to lower the prediction performance of the model, as the prediction basd on the testing set was 100% right. To recall, the original training dataset contains about 150 predictors and the model is based upon 40 predictors.
+
+Preprocessing function was not used but removing the predictors based on near zero variance, as I did, is similar to a PCA processing for instance, as PCA is based upon maximal variance among the predictors. 
+
+Based on the prediction result, I can conclude that my way of doing this small prediction project was correct, even though there are many other ways ! 
+
+# Reference
+
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. 
+Wearable Computing: Accelerometers Data Classification of Body Postures and Movements. 
+Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. 
+In: Lecture Notes in Computer Science. , pp. 52-61.
+Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz3XAuCoJYn
